@@ -1,0 +1,74 @@
+name: Build EON GPT Windows
+
+on: [push, workflow_dispatch]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Giải nén eon_gpt.zip (nếu có)
+        run: |
+          if [ -f eon_gpt.zip ]; then
+            unzip -o eon_gpt.zip
+          fi
+          if [ ! -f pubspec.yaml ] || [ ! -d lib ]; then
+            echo "::error::Không thấy pubspec.yaml / lib/. Hãy tải eon_gpt.zip lên gốc repo."
+            exit 1
+          fi
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Tạo khung Windows
+        run: |
+          mkdir -p /tmp/bak
+          cp -r lib /tmp/bak/lib
+          cp pubspec.yaml /tmp/bak/pubspec.yaml
+          flutter create --platforms=windows --org vn.eon --project-name eon_gpt .
+          rm -rf lib
+          cp -r /tmp/bak/lib lib
+          cp /tmp/bak/pubspec.yaml pubspec.yaml
+          rm -rf test
+
+      # Windows không có sqflite gốc -> dùng bản FFI (SQLite đi kèm)
+      - name: Chỉnh mã cho Windows (SQLite)
+        run: |
+          flutter pub add sqflite_common_ffi sqlite3_flutter_libs
+          sed -i "1i import 'package:sqflite_common_ffi/sqflite_ffi.dart';" lib/main.dart
+          sed -i 's|WidgetsFlutterBinding.ensureInitialized();|WidgetsFlutterBinding.ensureInitialized();\n  sqfliteFfiInit();\n  databaseFactory = databaseFactoryFfi;|' lib/main.dart
+          grep -q "databaseFactoryFfi" lib/main.dart
+
+      - name: Cài thư viện
+        run: flutter pub get
+
+      - name: Build Windows
+        run: flutter build windows --release
+
+      - name: Nén thành EON-GPT-windows.zip
+        run: |
+          cd build/windows/x64/runner/Release
+          7z a -tzip "$GITHUB_WORKSPACE/EON-GPT-windows.zip" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EON-GPT-windows
+          path: EON-GPT-windows.zip
+
+      - name: Đăng lên Releases (windows-latest)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete windows-latest -y --cleanup-tag || true
+          gh release create windows-latest EON-GPT-windows.zip \
+            --title "EON GPT - Windows" --notes "Bản Windows build từ commit ${GITHUB_SHA::7}. Giải nén rồi chạy eon_gpt.exe"
